@@ -30,6 +30,12 @@ class VoiceToVoiceBot:
         self.is_listening = False
         self.audio_queue = queue.Queue()
         
+        # Voice interrupt detection
+        self.is_speaking = False
+        self.should_stop_speaking = False
+        self.interrupt_queue = queue.Queue()
+        self.background_listening = False
+        
         # Configure TTS settings
         self._configure_tts()
         
@@ -133,36 +139,85 @@ class VoiceToVoiceBot:
             sys.exit(1)
 
     def speak(self, text: str):
-        """Convert text to speech with natural pauses"""
+        """Convert text to speech with interrupt detection"""
         print(f"Bot: {text}")
         
-        # Add natural pauses for better speech flow
-        sentences = text.split('. ')
-        for i, sentence in enumerate(sentences):
-            if sentence.strip():
-                # Add period back if it was removed by split
-                if i < len(sentences) - 1:
-                    sentence += '.'
-                
-                self.tts_engine.say(sentence.strip())
-                self.tts_engine.runAndWait()
-                
-                # Small pause between sentences for natural flow
-                if i < len(sentences) - 1:
-                    time.sleep(0.2)
+        try:
+            self.is_speaking = True
+            self.should_stop_speaking = False
+            
+            # Split into sentences for natural pauses and interrupt points
+            sentences = text.split('. ')
+            
+            for i, sentence in enumerate(sentences):
+                if sentence.strip() and not self.should_stop_speaking:
+                    # Add period back if it was removed by split
+                    if i < len(sentences) - 1:
+                        sentence += '.'
+                    
+                    # Speak the sentence
+                    self.tts_engine.say(sentence.strip())
+                    
+                    # Monitor for interrupts while speaking
+                    start_time = time.time()
+                    while self.tts_engine.isBusy() and not self.should_stop_speaking:
+                        time.sleep(0.05)  # Check every 50ms for interrupts
+                        
+                        # Safety timeout
+                        if time.time() - start_time > 10:
+                            break
+                    
+                    if self.should_stop_speaking:
+                        # Stop TTS immediately
+                        self.tts_engine.stop()
+                        print("🛑 ARKA stopped speaking - listening to you...")
+                        break
+                    
+                    # Natural pause between sentences (if not interrupted)
+                    if i < len(sentences) - 1 and not self.should_stop_speaking:
+                        pause_start = time.time()
+                        while time.time() - pause_start < 0.2 and not self.should_stop_speaking:
+                            time.sleep(0.05)
+                        
+                        if self.should_stop_speaking:
+                            break
+                            
+        except Exception as e:
+            print(f"TTS error: {e}")
+        finally:
+            self.is_speaking = False
 
     def listen_for_audio(self):
-        """Listen for audio input and add to queue"""
+        """Listen for audio input and add to queue, plus interrupt detection"""
         while self.is_listening:
             try:
                 with self.microphone as source:
-                    # Listen for audio with timeout
-                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
-                    self.audio_queue.put(audio)
+                    # If ARKA is speaking, listen for interrupts
+                    if self.is_speaking:
+                        # Short listen to detect interrupts
+                        audio = self.recognizer.listen(source, timeout=0.3, phrase_time_limit=2)
+                        
+                        # User interrupted!
+                        self.should_stop_speaking = True
+                        
+                        # Try to recognize what they said
+                        try:
+                            interrupted_text = self.recognizer.recognize_google(audio)
+                            if interrupted_text.strip():
+                                self.interrupt_queue.put(interrupted_text)
+                                print(f"\n🛑 Interrupted! You said: {interrupted_text}")
+                        except:
+                            print("\n🛑 Interrupted! (processing...)")
+                    else:
+                        # Normal listening when not speaking
+                        audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
+                        self.audio_queue.put(audio)
+                        
             except sr.WaitTimeoutError:
                 continue
             except Exception as e:
-                print(f"Error in audio listening: {e}")
+                if self.is_listening:  # Only print error if we're still supposed to be listening
+                    print(f"Error in audio listening: {e}")
                 continue
 
     def speech_to_text(self, audio) -> Optional[str]:
@@ -286,7 +341,24 @@ Remember: You're ARKA, a young Indian friend who's always excited to help and ch
         
         try:
             while True:
-                # Check for audio in queue
+                # Check for interrupts first
+                if not self.interrupt_queue.empty():
+                    interrupted_text = self.interrupt_queue.get()
+                    print(f"Processing interrupt: {interrupted_text}")
+                    
+                    # Process special commands
+                    if self.process_command(interrupted_text):
+                        break
+                    
+                    # Get AI response for interrupt
+                    print("Thinking...")
+                    response = self.get_ollama_response(interrupted_text)
+                    
+                    # Speak the response
+                    self.speak(response)
+                    continue
+                
+                # Check for regular audio in queue
                 try:
                     audio = self.audio_queue.get(timeout=0.1)
                     
