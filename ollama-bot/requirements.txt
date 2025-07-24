@@ -1,0 +1,23 @@
+# Voice-to-Voice Bot Requirements
+# Core dependencies for offline voice interaction
+
+# Speech Recognition
+SpeechRecognition==3.10.0
+pyaudio==0.2.11
+
+# Text-to-Speech
+pyttsx3==2.90
+
+# Ollama client
+ollama==0.3.3
+
+# Additional utilities
+numpy==1.24.3
+requests==2.31.0
+
+# For better audio handling (optional)
+sounddevice==0.4.6
+soundfile==0.12.1
+
+# Python dotenv for configuration
+python-dotenv==1.0.0
