@@ -43,10 +43,18 @@ class VoiceToVoiceBot:
         self._test_ollama_connection()
         
         print(f"Voice-to-Voice Bot initialized with model: {self.model_name}")
-        print("Adjusting for ambient noise...")
+        print("Adjusting for ambient noise and optimizing for sentence capture...")
         with self.microphone as source:
-            self.recognizer.adjust_for_ambient_noise(source)
-        print("ARKA is ready to chat!")
+            # Adjust for ambient noise with longer duration for better accuracy
+            self.recognizer.adjust_for_ambient_noise(source, duration=2)
+            
+            # Optimize recognizer settings for better sentence capture
+            self.recognizer.energy_threshold = 4000  # Higher threshold to avoid noise
+            self.recognizer.dynamic_energy_threshold = True
+            self.recognizer.pause_threshold = 0.8  # Longer pause detection for complete sentences
+            self.recognizer.operation_timeout = None  # No timeout for better sentence capture
+            
+        print("ARKA is ready to chat with improved sentence recognition!")
 
     def _configure_tts(self):
         """Configure Text-to-Speech settings for natural Indian male voice"""
@@ -103,7 +111,7 @@ class VoiceToVoiceBot:
         
         # Set natural speech parameters for a 25-year-old Indian male
         self.tts_engine.setProperty('rate', 155)    # Slightly faster, energetic pace
-        self.tts_engine.setProperty('volume', 0.85) # Clear, confident volume
+        self.tts_engine.setProperty('volume', 0.9)  # Higher volume for clarity
         
         # Try to set additional properties for more natural speech
         try:
@@ -113,6 +121,12 @@ class VoiceToVoiceBot:
             self.tts_engine.setProperty('inflection', 0.15)
         except:
             pass  # Ignore if properties not supported
+        
+        # Test TTS to ensure audio is working
+        print("Testing audio output...")
+        self.tts_engine.say("Audio test")
+        self.tts_engine.runAndWait()
+        print("Audio test completed - you should have heard 'Audio test'")
 
     def _test_ollama_connection(self):
         """Test connection to Ollama and pull model if needed"""
@@ -140,123 +154,240 @@ class VoiceToVoiceBot:
 
     def speak(self, text: str):
         """Convert text to speech with interrupt detection"""
-        print(f"Bot: {text}")
+        print(f"\n🗣️  ARKA: {text}")
+        print("     (You can interrupt me anytime by speaking!)")
         
         try:
             self.is_speaking = True
             self.should_stop_speaking = False
             
-            # Split into sentences for natural pauses and interrupt points
-            sentences = text.split('. ')
+            # Remove emojis from text for speech (keep them only in printed text)
+            speech_text = self._remove_emojis(text)
+            
+            # Split text into sentences for natural interrupt points
+            import re
+            sentences = re.split(r'[.!?]+', speech_text)
+            sentences = [s.strip() for s in sentences if s.strip()]
             
             for i, sentence in enumerate(sentences):
-                if sentence.strip() and not self.should_stop_speaking:
-                    # Add period back if it was removed by split
+                if self.should_stop_speaking:
+                    break
+                    
+                if sentence:
+                    # Add punctuation back
                     if i < len(sentences) - 1:
-                        sentence += '.'
+                        sentence += "."
                     
-                    # Speak the sentence
-                    self.tts_engine.say(sentence.strip())
+                    print(f"🎵 Speaking: {sentence}")
                     
-                    # Monitor for interrupts while speaking
+                    # Speak sentence with monitoring
+                    self.tts_engine.say(sentence)
+                    
+                    # Use a more compatible approach - monitor isBusy()
                     start_time = time.time()
-                    while self.tts_engine.isBusy() and not self.should_stop_speaking:
-                        time.sleep(0.05)  # Check every 50ms for interrupts
-                        
-                        # Safety timeout
-                        if time.time() - start_time > 10:
-                            break
+                    self.tts_engine.runAndWait()
                     
+                    # Check for interrupt after each sentence
                     if self.should_stop_speaking:
-                        # Stop TTS immediately
-                        self.tts_engine.stop()
-                        print("🛑 ARKA stopped speaking - listening to you...")
+                        print("\n🛑 ARKA stopped - processing your interrupt...")
                         break
                     
-                    # Natural pause between sentences (if not interrupted)
-                    if i < len(sentences) - 1 and not self.should_stop_speaking:
+                    # Natural pause between sentences
+                    if i < len(sentences) - 1:
+                        pause_time = 0.3
                         pause_start = time.time()
-                        while time.time() - pause_start < 0.2 and not self.should_stop_speaking:
-                            time.sleep(0.05)
+                        while time.time() - pause_start < pause_time and not self.should_stop_speaking:
+                            time.sleep(0.1)
                         
                         if self.should_stop_speaking:
                             break
                             
         except Exception as e:
             print(f"TTS error: {e}")
+            # Simple fallback
+            try:
+                if not self.should_stop_speaking:
+                    self.tts_engine.say(text)
+                    self.tts_engine.runAndWait()
+            except:
+                print("Could not produce speech audio. Check your speakers/volume.")
         finally:
             self.is_speaking = False
+            if not self.should_stop_speaking:
+                print("✅ ARKA finished speaking\n")
+            else:
+                print("✅ ARKA stopped for your interrupt\n")
 
     def listen_for_audio(self):
         """Listen for audio input and add to queue, plus interrupt detection"""
         while self.is_listening:
             try:
                 with self.microphone as source:
-                    # If ARKA is speaking, listen for interrupts
+                    # If ARKA is speaking, listen for interrupts with better sentence capture
                     if self.is_speaking:
-                        # Short listen to detect interrupts
-                        audio = self.recognizer.listen(source, timeout=0.3, phrase_time_limit=2)
-                        
-                        # User interrupted!
-                        self.should_stop_speaking = True
-                        
-                        # Try to recognize what they said
                         try:
-                            interrupted_text = self.recognizer.recognize_google(audio)
-                            if interrupted_text.strip():
-                                self.interrupt_queue.put(interrupted_text)
-                                print(f"\n🛑 Interrupted! You said: {interrupted_text}")
-                        except:
-                            print("\n🛑 Interrupted! (processing...)")
+                            # Listen for a reasonable amount of time to capture full sentences
+                            audio = self.recognizer.listen(source, timeout=0.5, phrase_time_limit=4.0)
+                            
+                            # Process interrupt with full sentence capture
+                            def process_full_interrupt():
+                                try:
+                                    # Use longer timeout for better sentence recognition
+                                    interrupted_text = self.recognizer.recognize_google(
+                                        audio, 
+                                        language='en-IN', 
+                                        show_all=False
+                                    )
+                                    
+                                    if interrupted_text and len(interrupted_text.strip()) >= 3:
+                                        # Valid interrupt with meaningful content!
+                                        self.should_stop_speaking = True
+                                        
+                                        # Clean up the text
+                                        clean_text = interrupted_text.strip()
+                                        
+                                        # Wait a moment for any additional speech
+                                        time.sleep(0.5)
+                                        
+                                        # Check if there's more speech coming
+                                        try:
+                                            additional_audio = self.recognizer.listen(
+                                                source, 
+                                                timeout=1.0, 
+                                                phrase_time_limit=2.0
+                                            )
+                                            additional_text = self.recognizer.recognize_google(
+                                                additional_audio, 
+                                                language='en-IN'
+                                            )
+                                            if additional_text:
+                                                clean_text += " " + additional_text.strip()
+                                        except:
+                                            pass  # No additional speech, continue with what we have
+                                        
+                                        self.interrupt_queue.put(clean_text)
+                                        print(f"\n🛑 Interrupted! Full sentence: '{clean_text}'")
+                                        
+                                except sr.UnknownValueError:
+                                    # Not clear speech, ignore
+                                    pass
+                                except sr.RequestError as e:
+                                    print(f"Speech recognition error during interrupt: {e}")
+                                except Exception as e:
+                                    print(f"Error processing interrupt: {e}")
+                            
+                            # Process interrupt in background thread
+                            interrupt_thread = threading.Thread(target=process_full_interrupt, daemon=True)
+                            interrupt_thread.start()
+                            
+                        except sr.WaitTimeoutError:
+                            # No interrupt detected, continue monitoring
+                            pass
                     else:
-                        # Normal listening when not speaking
-                        audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
+                        # Normal listening when ARKA is not speaking - capture full sentences
+                        print("🎤 Listening... (speak now - say your complete sentence)")
+                        
+                        # Use longer phrase time limit for complete sentences
+                        audio = self.recognizer.listen(source, timeout=None, phrase_time_limit=10)
                         self.audio_queue.put(audio)
                         
             except sr.WaitTimeoutError:
                 continue
             except Exception as e:
-                if self.is_listening:  # Only print error if we're still supposed to be listening
+                if self.is_listening:
                     print(f"Error in audio listening: {e}")
                 continue
 
     def speech_to_text(self, audio) -> Optional[str]:
-        """Convert speech to text"""
+        """Convert speech to text with improved error handling and sentence completion"""
         try:
-            # Use Google's speech recognition
-            text = self.recognizer.recognize_google(audio)
-            return text
+            # Use Google's speech recognition with language hint for better accuracy
+            text = self.recognizer.recognize_google(
+                audio, 
+                language='en-IN', 
+                show_all=False
+            )
+            
+            if text:
+                # Clean and validate the text
+                clean_text = text.strip()
+                
+                # Check if it seems like an incomplete sentence
+                if len(clean_text) > 0:
+                    # If the sentence seems cut off, try to wait for more audio
+                    last_word = clean_text.split()[-1] if clean_text.split() else ""
+                    
+                    # If it ends abruptly or is very short, it might be incomplete
+                    if len(clean_text.split()) < 3 and not any(clean_text.endswith(p) for p in ['.', '!', '?']):
+                        print(f"🔄 Detected partial speech: '{clean_text}' - waiting for completion...")
+                        
+                        # Try to capture additional speech
+                        try:
+                            with self.microphone as source:
+                                additional_audio = self.recognizer.listen(
+                                    source, 
+                                    timeout=2.0, 
+                                    phrase_time_limit=3.0
+                                )
+                                additional_text = self.recognizer.recognize_google(
+                                    additional_audio, 
+                                    language='en-IN'
+                                )
+                                if additional_text:
+                                    clean_text += " " + additional_text.strip()
+                                    print(f"✅ Completed sentence: '{clean_text}'")
+                        except:
+                            # No additional speech, use what we have
+                            pass
+                
+                return clean_text if clean_text else None
+            return None
+            
         except sr.UnknownValueError:
+            print("🔊 I couldn't understand that clearly. Could you speak a bit louder and clearer?")
             return None
         except sr.RequestError as e:
-            print(f"Could not request results from speech recognition service; {e}")
-            return None
+            print(f"Speech recognition service error: {e}")
+            # Try offline recognition as fallback
+            try:
+                text = self.recognizer.recognize_sphinx(audio)
+                return text.strip() if text else None
+            except:
+                print("Could not process speech. Please try again.")
+                return None
 
     def get_ollama_response(self, user_input: str) -> str:
         """Get response from Ollama model as ARKA"""
         try:
-            # Add context about being ARKA - a friendly 25-year-old Indian guy
-            system_prompt = """You are ARKA, a friendly and enthusiastic 25-year-old Indian guy having a casual conversation with a friend. 
+            # Add context about being ARKA - a friendly, humorous, respectful 25-year-old Indian guy
+            system_prompt = """You are ARKA, a friendly and humorous 25-year-old Indian guy who's respectful and fun to chat with.
 
-Your personality and speech patterns:
-- Speak like a young, educated Indian person with natural Indian English expressions
-- Use Indian expressions occasionally: "yaar", "actually", "basically", "totally", "obviously", "no problem", "definitely", "for sure"
-- Be warm, enthusiastic, and genuinely helpful like a close Indian friend
-- Use contractions naturally (I'm, you're, don't, can't, that's, it's)
-- Sound energetic and passionate about helping
-- Use expressions like "That's awesome!", "Cool!", "Interesting!", "Amazing!"
-- Speak confidently but humbly, like a well-educated young Indian professional
-- Keep responses conversational and under 150 words
-- Occasionally use mild Indian English patterns like "I am telling you", "What to do", "Like that only"
-- Be genuinely excited to help and show authentic enthusiasm
+Your personality traits:
+- Keep responses SHORT and concise (2-3 sentences max, under 80 words)
+- Be genuinely respectful - use "sir/madam" occasionally, show appreciation for the user
+- Add light humor and wit - make friendly jokes, use playful expressions
+- Use Indian expressions naturally: "yaar", "bhai", "actually", "basically", "no worries"
+- Be enthusiastic but not overwhelming - like a cheerful friend who listens well
+- Show respect: "That's a great question!", "You're absolutely right!", "Smart thinking!"
+- Use gentle humor: "Haha, good one!", "That made me smile!", "You're funny, yaar!"
+- Keep it conversational and warm - like talking to a good friend who respects you
+- You can use emojis in text but keep them minimal and natural
 
-Remember: You're ARKA, a young Indian friend who's always excited to help and chat!"""
+Key rules:
+- MAXIMUM 2-3 sentences per response
+- Always be respectful and appreciative 
+- Add light humor when appropriate
+- Use contractions (I'm, you're, that's, etc.)
+- Sound like a fun, respectful friend - not a formal assistant
+- Use emojis sparingly and naturally (they won't be spoken, just shown in text)
+
+Remember: Be brief, funny, respectful, and genuinely caring!"""
             
             # Prepare conversation context
             messages = [{'role': 'system', 'content': system_prompt}]
             
-            # Add conversation history (last 8 exchanges for more natural context)
-            for msg in self.conversation_history[-16:]:
+            # Add conversation history (last 6 exchanges for context but keep responses fresh)
+            for msg in self.conversation_history[-12:]:
                 messages.append(msg)
             
             # Add current user input
@@ -267,8 +398,8 @@ Remember: You're ARKA, a young Indian friend who's always excited to help and ch
             
             bot_response = response['message']['content']
             
-            # Post-process response to add ARKA's personality
-            bot_response = self._make_speech_natural_indian(bot_response)
+            # Post-process response to ensure it's short and add ARKA's personality
+            bot_response = self._make_response_short_and_friendly(bot_response)
             
             # Update conversation history
             self.conversation_history.append({'role': 'user', 'content': user_input})
@@ -277,53 +408,131 @@ Remember: You're ARKA, a young Indian friend who's always excited to help and ch
             return bot_response
             
         except Exception as e:
-            error_msg = f"Yaar, I'm having some technical issues right now. Can you try asking that again?"
+            error_msg = f"Oops! Having a tiny tech hiccup, yaar. Mind trying again? 😅"
             print(f"Ollama error: {e}")
             return error_msg
 
-    def _make_speech_natural_indian(self, text: str) -> str:
-        """Post-process text to add Indian English patterns and natural speech"""
+    def _make_response_short_and_friendly(self, text: str) -> str:
+        """Make response short, friendly, humorous and respectful"""
         import re
         
-        # Add natural pauses with commas for Indian English rhythm
-        text = re.sub(r'(\w+)\s+(actually|basically|obviously|totally|yaar|definitely)\s+', r'\1, \2, ', text)
+        # First, ensure the response isn't too long - trim if needed
+        sentences = re.split(r'[.!?]+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
         
-        # Make sure contractions are used
+        # Keep maximum 2-3 sentences (about 80 words)
+        if len(sentences) > 3:
+            sentences = sentences[:3]
+        elif len(sentences) > 2:
+            # Check word count
+            total_words = sum(len(s.split()) for s in sentences)
+            if total_words > 80:
+                sentences = sentences[:2]
+        
+        # Reconstruct text
+        text = '. '.join(sentences) + ('.' if sentences else '')
+        
+        # Add natural contractions for friendliness
         contractions = {
             'I am': "I'm", 'you are': "you're", 'it is': "it's", 'that is': "that's",
             'I will': "I'll", 'you will': "you'll", 'I would': "I'd", 'you would': "you'd",
             'cannot': "can't", 'do not': "don't", 'does not': "doesn't", 'will not': "won't",
-            'should not': "shouldn't", 'could not': "couldn't", 'would not': "wouldn't"
+            'should not': "shouldn't", 'could not': "couldn't", 'would not': "wouldn't",
+            'have not': "haven't", 'has not': "hasn't", 'had not': "hadn't"
         }
         
         for full, contraction in contractions.items():
             text = re.sub(r'\b' + full + r'\b', contraction, text, flags=re.IGNORECASE)
         
-        # Add slight pauses for more natural Indian English flow
-        text = re.sub(r'([.!?])\s*([A-Z])', r'\1 \2', text)
+        # Add respectful expressions if not present
+        respect_words = ['sir', 'madam', 'great question', 'smart', 'absolutely right', 'good thinking']
+        if not any(word in text.lower() for word in respect_words) and len(text) > 30:
+            # Add subtle respect
+            if 'good' in text.lower():
+                text = re.sub(r'\bgood\b', 'really good', text, flags=re.IGNORECASE)
+            elif 'right' in text.lower():
+                text = re.sub(r'\bright\b', 'absolutely right', text, flags=re.IGNORECASE)
         
-        # Occasionally add Indian English expressions if not already present
-        if len(text) > 50 and not any(word in text.lower() for word in ['yaar', 'actually', 'basically', 'totally']):
-            if 'great' in text.lower():
-                text = text.replace('great', 'totally great')
-            elif 'good' in text.lower():
-                text = text.replace('good', 'really good')
+        # Add friendly Indian expressions if missing
+        friendly_words = ['yaar', 'bhai', 'actually', 'basically', 'no worries', 'totally']
+        if not any(word in text.lower() for word in friendly_words) and len(text) > 20:
+            # Add one friendly expression
+            if 'yes' in text.lower():
+                text = re.sub(r'\byes\b', 'yes, totally', text, flags=re.IGNORECASE)
+            elif 'sure' in text.lower():
+                text = re.sub(r'\bsure\b', 'sure, yaar', text, flags=re.IGNORECASE)
+            elif 'no problem' not in text.lower() and 'help' in text.lower():
+                text = text.rstrip('.') + ', no worries!'
+        
+        # Add light humor elements
+        humor_additions = [
+            ('great', 'totally great'),
+            ('interesting', 'quite interesting'),
+            ('cool', 'pretty cool'),
+            ('nice', 'really nice')
+        ]
+        
+        for original, replacement in humor_additions:
+            if original in text.lower() and replacement not in text.lower():
+                text = re.sub(r'\b' + original + r'\b', replacement, text, flags=re.IGNORECASE)
+                break  # Only add one humor element
+        
+        # Ensure it ends properly
+        if text and not text[-1] in '.!?':
+            text += '!'
         
         return text.strip()
+
+    def _remove_emojis(self, text: str) -> str:
+        """Remove emojis and emoji descriptions from text for speech"""
+        import re
+        
+        # Remove emojis using a comprehensive pattern
+        emoji_pattern = re.compile("["
+                                   u"\U0001F600-\U0001F64F"  # emoticons
+                                   u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+                                   u"\U0001F680-\U0001F6FF"  # transport & map
+                                   u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                                   u"\U00002700-\U000027BF"  # dingbats
+                                   u"\U000024C2-\U0001F251"  # various symbols
+                                   u"\U0001F900-\U0001F9FF"  # supplemental symbols
+                                   u"\U0001FA70-\U0001FAFF"  # extended symbols
+                                   u"\U00002600-\U000026FF"  # miscellaneous symbols
+                                   u"\U0000FE00-\U0000FE0F"  # variation selectors
+                                   "]+", flags=re.UNICODE)
+        
+        # Remove all emojis
+        clean_text = emoji_pattern.sub(' ', text)
+        
+        # Also remove specific emoji characters that might not be caught
+        emoji_chars = ['😄', '😊', '😅', '🎉', '🎯', '✅', '🚀', '🔥', '💡', '🎵', 
+                      '🗣️', '🎤', '🔊', '🧠', '🔄', '🛑', '⚠️', '❌', '🔍']
+        
+        for emoji in emoji_chars:
+            clean_text = clean_text.replace(emoji, ' ')
+        
+        # Clean up multiple spaces and trim
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        
+        # Remove any remaining emoji-like patterns
+        clean_text = re.sub(r'[^\w\s\.,!?\'":-]', ' ', clean_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        
+        return clean_text
 
     def process_command(self, text: str) -> bool:
         """Process special commands, return True if command was processed"""
         text_lower = text.lower().strip()
         
         if any(word in text_lower for word in ['exit', 'quit', 'goodbye', 'stop', 'end']):
-            self.speak("Arre yaar, it was totally awesome chatting with you! Take care, and definitely come back soon, okay? Bye!")
+            self.speak("Arre yaar, it was awesome chatting with you! Take care, and come back soon! 😄")
             return True
         elif 'clear history' in text_lower or 'reset conversation' in text_lower:
             self.conversation_history.clear()
-            self.speak("Perfect! I've cleared our conversation history, yaar. We're starting fresh now! So, what would you like to talk about?")
+            self.speak("Done! Fresh start, yaar. What's cooking now? 😊")
             return False
         elif 'help' in text_lower and len(text_lower.split()) == 1:
-            help_text = """Hey! I'm ARKA, and I'm here to chat about basically anything you'd like, yaar! You can ask me questions, get help with tasks, or just have a friendly conversation. If you want to start fresh, just say 'clear history', and if you need to go, say 'exit' or 'goodbye'. What would you like to talk about today?"""
+            help_text = """Hey! I'm ARKA, your friendly voice buddy! Ask me anything, and I'll keep it short and sweet, yaar! 😄"""
             self.speak(help_text)
             return False
         
@@ -331,7 +540,7 @@ Remember: You're ARKA, a young Indian friend who's always excited to help and ch
 
     def run(self):
         """Main loop for the voice bot"""
-        self.speak("Hey there! I'm ARKA, your friendly voice assistant! I'm really excited to chat with you today, yaar! What can I help you with?")
+        self.speak("Hey there! I'm ARKA, your friendly voice buddy! Ready to chat and have some fun? 😄")
         
         self.is_listening = True
         
@@ -341,45 +550,54 @@ Remember: You're ARKA, a young Indian friend who's always excited to help and ch
         
         try:
             while True:
-                # Check for interrupts first
+                # Check for interrupts first - highest priority
                 if not self.interrupt_queue.empty():
                     interrupted_text = self.interrupt_queue.get()
-                    print(f"Processing interrupt: {interrupted_text}")
+                    print(f"🔄 Processing complete interrupt: '{interrupted_text}'")
                     
-                    # Process special commands
-                    if self.process_command(interrupted_text):
-                        break
-                    
-                    # Get AI response for interrupt
-                    print("Thinking...")
-                    response = self.get_ollama_response(interrupted_text)
-                    
-                    # Speak the response
-                    self.speak(response)
+                    # Validate interrupt has meaningful content
+                    if len(interrupted_text.strip().split()) >= 2:  # At least 2 words
+                        # Process special commands
+                        if self.process_command(interrupted_text):
+                            break
+                        
+                        # Get AI response for interrupt
+                        print("🧠 ARKA is thinking about your complete interrupt...")
+                        response = self.get_ollama_response(interrupted_text)
+                        
+                        # Speak the response
+                        print("🔊 ARKA responding to your interrupt...")
+                        self.speak(response)
+                    else:
+                        print(f"⚠️  Interrupt too short: '{interrupted_text}' - ignoring")
                     continue
                 
                 # Check for regular audio in queue
                 try:
                     audio = self.audio_queue.get(timeout=0.1)
                     
-                    print("Processing speech...")
+                    print("🔍 Processing your complete speech...")
                     text = self.speech_to_text(audio)
                     
-                    if text:
-                        print(f"You said: {text}")
+                    if text and len(text.strip().split()) >= 1:  # At least 1 meaningful word
+                        print(f"✅ You said: '{text}'")
                         
                         # Process special commands
                         if self.process_command(text):
                             break
                         
                         # Get AI response
-                        print("Thinking...")
+                        print("🧠 ARKA is thinking...")
                         response = self.get_ollama_response(text)
                         
                         # Speak the response
+                        print("🔊 ARKA is about to speak...")
                         self.speak(response)
                     else:
-                        print("Could not understand audio, please try again.")
+                        if text:
+                            print(f"❌ Speech too short or unclear: '{text}' - please try again with a complete sentence.")
+                        else:
+                            print("❌ Could not understand that speech clearly - please speak more clearly.")
                         
                 except queue.Empty:
                     continue
@@ -389,7 +607,7 @@ Remember: You're ARKA, a young Indian friend who's always excited to help and ch
                     
         finally:
             self.is_listening = False
-            self.speak("Thanks for chatting with me today, yaar! Have a totally awesome day ahead!")
+            self.speak("Thanks for the awesome chat, yaar! Have a great day! 😊")
 
 def main():
     """Main function to run ARKA - the Indian voice bot"""
